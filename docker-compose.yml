@@ -1,0 +1,116 @@
+version: '3'
+
+services:
+  mongodb:
+    image: mongo:latest
+    container_name: bank-analysis-mongodb
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongodb_data:/data/db
+    networks:
+      - bank-network
+    restart: always
+
+  auth-service:
+    build:
+      context: ./bank-analysis/auth-service
+      dockerfile: Dockerfile
+    container_name: bank-analysis-auth
+    ports:
+      - "8081:8081"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+      - JWT_SECRET=your_secret_key_change_in_production
+    depends_on:
+      - mongodb
+    networks:
+      - bank-network
+    restart: always
+
+  import-service:
+    build:
+      context: ./bank-analysis/import-service
+      dockerfile: Dockerfile
+    container_name: bank-analysis-import
+    ports:
+      - "8082:8082"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+    depends_on:
+      - mongodb
+    networks:
+      - bank-network
+    restart: always
+
+  analysis-service:
+    build:
+      context: ./bank-analysis/analysis-service
+      dockerfile: Dockerfile
+    container_name: bank-analysis-analysis
+    ports:
+      - "8083:8083"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+    depends_on:
+      - mongodb
+    networks:
+      - bank-network
+    restart: always
+
+  export-service:
+    build:
+      context: ./bank-analysis/export-service
+      dockerfile: Dockerfile
+    container_name: bank-analysis-export
+    ports:
+      - "8084:8084"
+    environment:
+      - MONGO_URI=mongodb://mongodb:27017
+    depends_on:
+      - mongodb
+    networks:
+      - bank-network
+    restart: always
+
+  api-gateway:
+    build:
+      context: ./bank-analysis/api-gateway
+      dockerfile: Dockerfile
+    container_name: bank-analysis-gateway
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTH_SERVICE_URL=http://auth-service:8081
+      - IMPORT_SERVICE_URL=http://import-service:8082
+      - ANALYSIS_SERVICE_URL=http://analysis-service:8083
+      - EXPORT_SERVICE_URL=http://export-service:8084
+      - JWT_SECRET=your_secret_key_change_in_production
+    depends_on:
+      - auth-service
+      - import-service
+      - analysis-service
+      - export-service
+    networks:
+      - bank-network
+    restart: always
+
+  frontend:
+    build:
+      context: ./bank-analysis/frontend
+      dockerfile: Dockerfile
+    container_name: bank-analysis-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - api-gateway
+    networks:
+      - bank-network
+    restart: always
+
+networks:
+  bank-network:
+    driver: bridge
+
+volumes:
+  mongodb_data:
