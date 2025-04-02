@@ -95,7 +95,7 @@
 </template>
 
 <script>
-import axios from 'axios'
+// import axios from 'axios'
 
 export default {
   name: 'ExportView',
@@ -155,7 +155,7 @@ export default {
         
         // Get the export URL with authentication token
         const token = localStorage.getItem('token')
-        const url = '/api/export/csv' + this.buildQueryString(params)
+        const url = '/export/csv' + this.buildQueryString(params)
         
         // Create a temporary link element and trigger a download
         const link = document.createElement('a')
@@ -190,20 +190,20 @@ export default {
       }
     },
     
-    redownload(item) {
-      // In a real app, this would re-trigger the download with the same parameters
-      const url = '/api/export/csv'
-      const token = localStorage.getItem('token')
+    // redownload(item) {
+    //   // In a real app, this would re-trigger the download with the same parameters
+    //   const url = '/export/csv'
+    //   const token = localStorage.getItem('token')
       
-      const link = document.createElement('a')
-      link.href = url
-      link.setAttribute('download', '')
-      link.setAttribute('data-auth', `Bearer ${token}`)
+    //   const link = document.createElement('a')
+    //   link.href = url
+    //   link.setAttribute('download', '')
+    //   link.setAttribute('data-auth', `Bearer ${token}`)
       
-      document.body.appendChild(link)
-      link.click()
-      document.body.removeChild(link)
-    },
+    //   document.body.appendChild(link)
+    //   link.click()
+    //   document.body.removeChild(link)
+    // },
     
     buildQueryString(params) {
       if (Object.keys(params).length === 0) return ''

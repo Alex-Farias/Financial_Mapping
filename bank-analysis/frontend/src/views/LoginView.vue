@@ -68,12 +68,13 @@ export default {
       this.errorMessage = ''
       
       try {
-        const response = await axios.post('/api/auth/login', {
+        const response = await axios.post('/auth/login', {
           email: this.email,
           password: this.password
         })
         
         // Store token and user info
+        localStorage.setItem('debugLogs', response.data.token);
         localStorage.setItem('token', response.data.token)
         
         // Emit login event
@@ -98,7 +99,7 @@ export default {
       this.errorMessage = ''
       
       try {
-        const response = await axios.post('/api/auth/register', {
+        const response = await axios.post('/auth/register', {
           email: this.email,
           password: this.password
         })

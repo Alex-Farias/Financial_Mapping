@@ -281,7 +281,7 @@ export default {
           params.endDate = this.endDate
         }
         
-        const response = await axios.get('/api/transactions', {
+        const response = await axios.get('/transactions', {
           params,
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         })
@@ -308,7 +308,7 @@ export default {
       this.isLoading = true
       
       try {
-        const response = await axios.get('/api/transactions/search', {
+        const response = await axios.get('/transactions/search', {
           params: { q: this.searchQuery },
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         })
@@ -401,7 +401,7 @@ export default {
       }
       
       try {
-        await axios.put('/api/categories', {
+        await axios.put('/categories', {
           transactionIds: [this.editingTransaction.id],
           category: this.editingTransaction.category
         }, {
@@ -426,7 +426,7 @@ export default {
       if (!this.selectedCategory || this.selectedTransactions.length === 0) return
       
       try {
-        await axios.put('/api/categories', {
+        await axios.put('/categories', {
           transactionIds: this.selectedTransactions,
           category: this.selectedCategory
         }, {

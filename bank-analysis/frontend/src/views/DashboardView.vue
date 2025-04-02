@@ -192,14 +192,14 @@ export default {
         this.isLoading = true
         
         // Fetch monthly analysis data
-        const analysisResponse = await axios.get('/api/analysis/monthly', {
+        const analysisResponse = await axios.get('/analysis/monthly', {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         })
         
         this.monthlyData = analysisResponse.data
         
         // Fetch recent transactions
-        const transactionsResponse = await axios.get('/api/transactions?limit=5', {
+        const transactionsResponse = await axios.get('/transactions?limit=5', {
           headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
         })
         

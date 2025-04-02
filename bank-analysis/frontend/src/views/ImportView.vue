@@ -174,7 +174,7 @@ export default {
         const formData = new FormData()
         formData.append('csv_file', this.selectedFile)
         
-        const response = await axios.post('/api/import/upload', formData, {
+        const response = await axios.post('/import/upload', formData, {
           headers: {
             'Content-Type': 'multipart/form-data',
             'Authorization': `Bearer ${localStorage.getItem('token')}`
@@ -212,7 +212,7 @@ export default {
       this.isScanning = true
       
       try {
-        const response = await axios.post('/api/import/scan', {
+        const response = await axios.post('/import/scan', {
           folderPath: this.folderPath
         }, {
           headers: {

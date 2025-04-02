@@ -4,7 +4,10 @@ import router from './router'
 import axios from 'axios'
 
 // Setup global event bus
-Vue.prototype.$bus = new Vue()
+Vue.prototype.$bus = new Vue({
+  router,
+  render: h => h(App)
+}).$mount('#app')
 
 // Configure axios for API requests
 axios.defaults.baseURL = process.env.VUE_APP_API_URL || 'http://localhost:8080/api'

@@ -63,7 +63,10 @@ const router = new VueRouter({
 
 // Navigation guard to check authentication
 router.beforeEach((to, from, next) => {
-  const isLoggedIn = !!localStorage.getItem('token')
+  const token = localStorage.getItem('token')
+  console.log('Token in navigation guard:', token)
+  const isLoggedIn = !!token
+  console.log('isLoggedIn:', isLoggedIn)
   const requiresAuth = to.matched.some(record => record.meta.requiresAuth)
   
   if (requiresAuth && !isLoggedIn) {

@@ -76,9 +76,10 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
-	router.HandleFunc("/register", registerHandler).Methods("POST")
-	router.HandleFunc("/login", loginHandler).Methods("POST")
-	router.HandleFunc("/validate", validateTokenHandler).Methods("POST")
+	authRouter := router.PathPrefix("/api/auth").Subrouter()
+	authRouter.HandleFunc("/register", registerHandler).Methods("POST")
+	authRouter.HandleFunc("/login", loginHandler).Methods("POST")
+	authRouter.HandleFunc("/validate", validateTokenHandler).Methods("POST")
 
 	port := os.Getenv("PORT")
 	if port == "" {
