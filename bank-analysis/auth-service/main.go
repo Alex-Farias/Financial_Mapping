@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt" // Add this import
 	"log"
 	"net/http"
 	"os"
+	"strings" // Add this import
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -38,8 +40,9 @@ type RegisterRequest struct {
 
 // Response represents the HTTP response
 type Response struct {
-	Message string `json:"message"`
-	Token   string `json:"token,omitempty"`
+    Message string `json:"message"`
+    Token   string `json:"token,omitempty"`
+    Email   string `json:"email,omitempty"`  // Add this field
 }
 
 var client *mongo.Client
@@ -182,6 +185,33 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(resp)
 }
 
+func generateToken(email string) (string, error) {
+	// Create claims with user email and expiry time
+	claims := jwt.MapClaims{
+		"email": email,
+		"exp":   time.Now().Add(time.Hour * 24).Unix(), // Token valid for 24 hours
+	}
+
+	// Create token
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+
+	// Get JWT secret from environment variable
+	secretKey := os.Getenv("JWT_SECRET")
+	if secretKey == "" {
+		secretKey = "your_secret_key" // Fallback
+	}
+
+	// Sign token with secret key
+	tokenString, err := token.SignedString([]byte(secretKey))
+	if err != nil {
+		log.Printf("Error generating token: %v", err)
+		return "", err
+	}
+
+	log.Printf("Generated token for %s", email)
+	return tokenString, nil
+}
+
 func validateTokenHandler(w http.ResponseWriter, r *http.Request) {
 	// Get token from Authorization header
 	tokenString := r.Header.Get("Authorization")
@@ -195,36 +225,102 @@ func validateTokenHandler(w http.ResponseWriter, r *http.Request) {
 		tokenString = tokenString[7:]
 	}
 
+	// Get JWT secret from environment variable
+	secretKey := os.Getenv("JWT_SECRET")
+	if secretKey == "" {
+		secretKey = "your_secret_key" // Fallback
+	}
+
 	// Parse and validate token
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return jwtKey, nil
+		// Validate signing method
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return []byte(secretKey), nil
 	})
 
 	if err != nil || !token.Valid {
+		log.Printf("Token validation error: %v", err)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
 
-	// Token is valid
+	// Get claims for response
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+		return
+	}
+
+	// Token is valid, return user info
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Response{Message: "Token is valid"})
+	json.NewEncoder(w).Encode(Response{
+		Message: "Token is valid",
+		Email:   claims["email"].(string),
+	})
 }
 
-func generateToken(email string) (string, error) {
-	// Create claims with user email and expiry time
-	claims := jwt.MapClaims{
-		"email": email,
-		"exp":   time.Now().Add(time.Hour * 24).Unix(), // Token valid for 24 hours
-	}
+// authMiddleware validates JWT tokens and adds userID to request context
+func authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Get token from Authorization header
+		authHeader := r.Header.Get("Authorization")
+		if authHeader == "" {
+			http.Error(w, "Authorization header required", http.StatusUnauthorized)
+			return
+		}
 
-	// Create token
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		// Remove Bearer prefix if present
+		tokenString := authHeader
+		if strings.HasPrefix(authHeader, "Bearer ") {
+			tokenString = authHeader[7:]
+		}
 
-	// Sign token with secret key
-	tokenString, err := token.SignedString(jwtKey)
-	if err != nil {
-		return "", err
-	}
+		log.Printf("Received token: %s", tokenString)
 
-	return tokenString, nil
+		// Parse token
+		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			// Validate signing method
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return jwtKey, nil
+		})
+
+		if err != nil {
+			log.Printf("Token parsing error: %v", err)
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Check if token is valid
+		if !token.Valid {
+			log.Printf("Token is invalid")
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
+		// Extract claims
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			log.Printf("Invalid token claims format")
+			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			return
+		}
+
+		// Set user ID in context
+		userID, ok := claims["email"].(string)
+		if !ok {
+			log.Printf("Invalid user ID in token claims")
+			http.Error(w, "Invalid user ID in token", http.StatusUnauthorized)
+			return
+		}
+
+		log.Printf("User authenticated: %s", userID)
+
+		// Create a new request context with the user ID
+		ctx := context.WithValue(r.Context(), "userID", userID)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
 }

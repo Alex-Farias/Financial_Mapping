@@ -191,16 +191,24 @@ export default {
       try {
         this.isLoading = true
         
+        // Get token from localStorage
+        const token = localStorage.getItem('token')
+        if (!token) {
+          console.error('No token found in localStorage')
+          this.$router.push('/login')
+          return
+        }
+        
         // Fetch monthly analysis data
         const analysisResponse = await axios.get('/analysis/monthly', {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          headers: { 'Authorization': `Bearer ${token}` }
         })
         
         this.monthlyData = analysisResponse.data
         
         // Fetch recent transactions
         const transactionsResponse = await axios.get('/transactions?limit=5', {
-          headers: { 'Authorization': `Bearer ${localStorage.getItem('token')}` }
+          headers: { 'Authorization': `Bearer ${token}` }
         })
         
         this.recentTransactions = transactionsResponse.data.transactions
@@ -215,6 +223,12 @@ export default {
         
       } catch (error) {
         console.error('Error fetching dashboard data:', error)
+        
+        // If unauthorized, redirect to login
+        if (error.response && error.response.status === 401) {
+          localStorage.removeItem('token')
+          this.$router.push('/login')
+        }
       } finally {
         this.isLoading = false
       }

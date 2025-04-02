@@ -73,22 +73,25 @@ export default {
           password: this.password
         })
         
-        // Store token and user info
-        localStorage.setItem('debugLogs', response.data.token);
-        localStorage.setItem('token', response.data.token)
+        // Store token in localStorage
+        const token = response.data.token
+        localStorage.setItem('token', token)
         
-        // Emit login event
+        console.log('Login successful, token stored')
+        
+        // Make sure to trigger the login event AFTER storing the token
         this.$bus.$emit('login')
         
-        // Redirect to dashboard
-        this.$router.push('/dashboard')
+        // Wait a moment before redirecting to ensure event is processed
+        setTimeout(() => {
+          this.$router.push('/dashboard')
+        }, 100)
       } catch (error) {
         this.errorMessage = error.response?.data?.message || 'Login failed'
       } finally {
         this.isLoading = false
       }
     },
-    
     async register() {
       if (!this.email || !this.password) {
         this.errorMessage = 'Please enter both email and password'

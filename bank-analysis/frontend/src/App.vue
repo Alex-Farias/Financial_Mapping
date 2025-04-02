@@ -87,12 +87,23 @@ export default {
     this.isLoggedIn = !!token
     
     // Listen for auth state changes
-    this.$bus.$on('login', this.handleLogin)
-    this.$bus.$on('logout', this.handleLogout)
+    // FIX: Make sure $bus is defined before using it
+    if (this.$bus) {
+      this.$bus.$on('login', this.handleLogin)
+      this.$bus.$on('logout', this.handleLogout)
+    }
     
     // Apply dark mode if set
     if (this.isDarkMode) {
       document.body.classList.add('dark-mode')
+    }
+  },
+  // Add destroyed lifecycle hook to remove event listeners
+  destroyed() {
+    // Clean up event listeners
+    if (this.$bus) {
+      this.$bus.$off('login', this.handleLogin)
+      this.$bus.$off('logout', this.handleLogout)
     }
   },
   methods: {
