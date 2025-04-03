@@ -83,9 +83,10 @@ func main() {
 	// Add debug endpoint for health checks
 	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "service": "import"})
 	}).Methods("GET")
 	
+	// Routes for import functionality - do NOT include /api/import prefix (the API gateway adds it)
 	router.HandleFunc("/upload", uploadHandler).Methods("POST")
 	router.HandleFunc("/scan", scanFolderHandler).Methods("POST")
 
@@ -101,16 +102,13 @@ func main() {
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
     // Extract user ID from the request
     userID := r.Header.Get("X-User-ID")
-    log.Printf("Upload request received - User ID: %s", userID)
+    log.Printf("Upload request received from user: %s", userID)
     
     if userID == "" {
         log.Printf("ERROR: Missing X-User-ID header")
         http.Error(w, "User ID is required", http.StatusBadRequest)
         return
     }
-
-    // Log headers for debugging
-    log.Printf("Request headers: %+v", r.Header)
 
     // Parse multipart form with 32MB max memory
     if err := r.ParseMultipartForm(32 << 20); err != nil {

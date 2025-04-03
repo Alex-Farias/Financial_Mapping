@@ -19,7 +19,7 @@ var (
 	importServiceURL    = getEnv("IMPORT_SERVICE_URL", "http://import-service:8082")
 	analysisServiceURL  = getEnv("ANALYSIS_SERVICE_URL", "http://analysis-service:8083")
 	exportServiceURL    = getEnv("EXPORT_SERVICE_URL", "http://export-service:8084")
-	jwtKey              = []byte(getEnv("JWT_SECRET", "your_secret_key"))
+	jwtKey              = []byte(getEnv("JWT_SECRET", "your_secret_key_change_in_production"))
 )
 
 func main() {
@@ -28,9 +28,15 @@ func main() {
 	// Setup CORS middleware
 	router.Use(corsMiddleware)
 
+	// Add a debug endpoint
+	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"status":"ok","service":"api-gateway"}`))
+	}).Methods("GET")
+
 	// Public routes (no authentication required)
-	publicRouter := router.PathPrefix("/api").Subrouter()
-	publicRouter.PathPrefix("/auth").Handler(createReverseProxy(authServiceURL))
+	publicRouter := router.PathPrefix("/api/auth").Subrouter()
+	publicRouter.PathPrefix("/").Handler(createReverseProxy(authServiceURL))
 
 	// Protected routes (authentication required)
 	protectedRouter := router.PathPrefix("/api").Subrouter()
@@ -40,7 +46,7 @@ func main() {
 	protectedRouter.PathPrefix("/import").Handler(createReverseProxy(importServiceURL))
 	protectedRouter.PathPrefix("/analysis").Handler(createReverseProxy(analysisServiceURL))
 	protectedRouter.PathPrefix("/export").Handler(createReverseProxy(exportServiceURL))
-	protectedRouter.PathPrefix("/transactions").Handler(createReverseProxy(analysisServiceURL))
+	protectedRouter.PathPrefix("/transactions").Handler(createReverseProxy(analysisServiceURL + "/transactions"))
 	protectedRouter.PathPrefix("/categories").Handler(createReverseProxy(analysisServiceURL))
 
 	// Static file server for frontend
@@ -54,49 +60,71 @@ func main() {
 
 // createReverseProxy creates a reverse proxy to the specified target URL
 func createReverseProxy(targetURL string) http.Handler {
-	url, err := url.Parse(targetURL)
-	if err != nil {
-		log.Fatal(err)
-	}
+    url, err := url.Parse(targetURL)
+    if err != nil {
+        log.Fatal(err)
+    }
 
-	proxy := httputil.NewSingleHostReverseProxy(url)
+    proxy := httputil.NewSingleHostReverseProxy(url)
 
-	// Modify request to strip the /api/{service} prefix and add X-User-ID header
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		
-		// Save original URL for logging
-		originalPath := req.URL.Path
-		
-		// Remove /api prefix
-		path := strings.TrimPrefix(originalPath, "/api")
-		
-		// Remove service prefix (keep only the endpoint part)
-		parts := strings.SplitN(path, "/", 3)
-		if len(parts) >= 3 {
-			// If path is like /import/upload, we want just /upload
-			req.URL.Path = "/" + parts[2]
-		} else if len(parts) == 2 {
-			// If path is like /import/?, we want just /?
-			if strings.Contains(parts[1], "?") {
-				req.URL.Path = "/"
-			} else {
-				// If path is like /import, we want just /
-				req.URL.Path = "/"
-			}
-		}
-		
-		log.Printf("Forwarding request: %s -> %s%s", originalPath, targetURL, req.URL.Path)
-		
-		// Get user ID from context
-		if userID, ok := req.Context().Value("userID").(string); ok {
-			req.Header.Set("X-User-ID", userID)
-			log.Printf("Added X-User-ID header: %s", userID)
-		}
-	}
+    // Modify request to strip the /api/{service} prefix and add X-User-ID header
+    originalDirector := proxy.Director
+    proxy.Director = func(req *http.Request) {
+        originalDirector(req)
+        
+        // Save original URL for logging
+        originalPath := req.URL.Path
+        
+        // Handle special paths first
+        if strings.HasPrefix(originalPath, "/api/transactions") {
+            // Just use /transactions
+            req.URL.Path = "/transactions"
+            log.Printf("Forwarding request: %s -> %s%s", originalPath, targetURL, req.URL.Path)
+            
+            // Get user ID from context
+            if userID, ok := req.Context().Value("userID").(string); ok {
+                req.Header.Set("X-User-ID", userID)
+                log.Printf("Added X-User-ID header: %s", userID)
+            }
+            return
+        }
+        
+        // Standard path processing
+        path := strings.TrimPrefix(originalPath, "/api")
+        
+        // Extract the service name (like /auth, /import, etc.)
+        parts := strings.SplitN(path, "/", 3)
+        if len(parts) >= 3 {
+            // If path is like /import/upload, we want just /upload
+            req.URL.Path = "/" + parts[2]
+        } else if len(parts) == 2 {
+            // If path is just /import, we want just /
+            req.URL.Path = "/"
+        }
+        
+        log.Printf("Forwarding request: %s -> %s%s", originalPath, targetURL, req.URL.Path)
+        
+        // Get user ID from context
+        if userID, ok := req.Context().Value("userID").(string); ok {
+            req.Header.Set("X-User-ID", userID)
+            log.Printf("Added X-User-ID header: %s", userID)
+        }
+    }
 
-	return proxy
+    // Modify the response if needed
+    proxy.ModifyResponse = func(resp *http.Response) error {
+        // Log the response status code
+        log.Printf("Received response: %d (%s)", resp.StatusCode, resp.Status)
+        return nil
+    }
+
+    // Handle proxy errors
+    proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+        log.Printf("Proxy error: %v", err)
+        http.Error(w, fmt.Sprintf("Service unavailable: %v", err), http.StatusServiceUnavailable)
+    }
+
+    return proxy
 }
 
 // authMiddleware validates JWT tokens and adds userID to request context
@@ -116,7 +144,7 @@ func authMiddleware(next http.Handler) http.Handler {
 			tokenString = authHeader[7:]
 		}
 
-		log.Printf("Processing token: %s... for path: %s", tokenString[:10], r.URL.Path)
+		log.Printf("Processing token for path: %s", r.URL.Path)
 
 		// Parse token
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {

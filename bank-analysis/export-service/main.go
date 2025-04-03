@@ -63,6 +63,7 @@ func main() {
 		})
 	}).Methods("GET")
 	
+	// Don't include /api/export prefix as the API gateway adds it
 	router.HandleFunc("/csv", exportCSVHandler).Methods("GET")
 	
 	// Debug endpoint to view transactions
@@ -81,9 +82,12 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 	// Extract user ID from the request
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
+		log.Printf("Missing X-User-ID header")
 		http.Error(w, "User ID is required", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("Processing CSV export for user: %s", userID)
 
 	// Get optional date range
 	startStr := r.URL.Query().Get("start")
@@ -186,6 +190,8 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
+
+// Add this complete function to your export-service/main.go file
 
 func debugTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 	userID := r.Header.Get("X-User-ID")

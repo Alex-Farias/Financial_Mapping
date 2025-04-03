@@ -95,10 +95,10 @@ func main() {
 		})
 	}).Methods("GET")
 	
-	authRouter := router.PathPrefix("/api/auth").Subrouter()
-	authRouter.HandleFunc("/register", registerHandler).Methods("POST")
-	authRouter.HandleFunc("/login", loginHandler).Methods("POST")
-	authRouter.HandleFunc("/validate", validateTokenHandler).Methods("POST")
+	// IMPORTANT: Routes must NOT have the /api/auth prefix since the API gateway adds it
+	router.HandleFunc("/register", registerHandler).Methods("POST")
+	router.HandleFunc("/login", loginHandler).Methods("POST")
+	router.HandleFunc("/validate", validateTokenHandler).Methods("POST")
 
 	port := os.Getenv("PORT")
 	if port == "" {

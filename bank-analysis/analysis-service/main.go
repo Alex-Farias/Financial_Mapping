@@ -18,13 +18,14 @@ import (
 
 // Transaction represents a financial transaction
 type Transaction struct {
-	UserID      string    `json:"userId" bson:"userId"`
-	Date        time.Time `json:"date" bson:"date"`
-	Description string    `json:"description" bson:"description"`
-	Category    string    `json:"category" bson:"category"`
-	Amount      float64   `json:"amount" bson:"amount"`
-	Type        string    `json:"type" bson:"type"` // "credit" or "debit"
-	Source      string    `json:"source" bson:"source"`
+	ID          primitive.ObjectID `json:"id,omitempty" bson:"_id,omitempty"`
+	UserID      string             `json:"userId" bson:"userId"`
+	Date        time.Time          `json:"date" bson:"date"`
+	Description string             `json:"description" bson:"description"`
+	Category    string             `json:"category" bson:"category"`
+	Amount      float64            `json:"amount" bson:"amount"`
+	Type        string             `json:"type" bson:"type"` // "credit" or "debit"
+	Source      string             `json:"source" bson:"source"`
 }
 
 // MonthlySpending represents monthly spending aggregation
@@ -66,7 +67,7 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
-	
+
 	// Add debug endpoint
 	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Header.Get("X-User-ID")
@@ -77,8 +78,9 @@ func main() {
 			"userID": userID,
 		})
 	}).Methods("GET")
-	
-	// Main routes - notice these are WITHOUT the /api/analysis prefix
+
+	// IMPORTANT: The routes must match exactly what the API gateway is forwarding
+	// Main routes - notice these are explicitly defined
 	router.HandleFunc("/monthly", getMonthlyAnalysisHandler).Methods("GET")
 	router.HandleFunc("/transactions", getTransactionsHandler).Methods("GET")
 	router.HandleFunc("/transactions/search", searchTransactionsHandler).Methods("GET")
@@ -116,12 +118,34 @@ func getTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Build date filter if provided
+	dateFilter := bson.M{}
+	startDateStr := r.URL.Query().Get("startDate")
+	endDateStr := r.URL.Query().Get("endDate")
+	
+	if startDateStr != "" {
+		if startDate, err := time.Parse("2006-01-02", startDateStr); err == nil {
+			dateFilter["$gte"] = startDate
+		}
+	}
+	
+	if endDateStr != "" {
+		if endDate, err := time.Parse("2006-01-02", endDateStr); err == nil {
+			dateFilter["$lte"] = endDate
+		}
+	}
+
 	// Query transactions from MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Count total transactions
+	// Build filter
 	filter := bson.M{"userId": userID}
+	if len(dateFilter) > 0 {
+		filter["date"] = dateFilter
+	}
+
+	// Count total transactions
 	total, err := collection.CountDocuments(ctx, filter)
 	if err != nil {
 		log.Printf("Error counting documents: %v", err)
@@ -324,61 +348,77 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Group by year and month
+	// Group by year and month - using proper MongoDB pipeline syntax
 	pipeline := mongo.Pipeline{
 		// Match user's transactions within date range
-		{{Key: "$match", Value: bson.M{
-			"userId": userID,
-			"date": bson.M{
-				"$gte": start,
-				"$lte": end,
-			},
-		}}},
+		bson.D{
+			{Key: "$match", Value: bson.D{
+				{Key: "userId", Value: userID},
+				{Key: "date", Value: bson.D{
+					{Key: "$gte", Value: start},
+					{Key: "$lte", Value: end},
+				}},
+			}},
+		},
 		// Group by year, month, and category
-		{{Key: "$group", Value: bson.M{
-			"_id": bson.M{
-				"year":     bson.M{"$year": "$date"},
-				"month":    bson.M{"$month": "$date"},
-				"category": "$category",
-			},
-			"totalAmount": bson.M{"$sum": bson.M{
-				"$cond": []interface{}{
-					bson.M{"$eq": []interface{}{"$type", "credit"}},
-					"$amount",
-					bson.M{"$multiply": []interface{}{"$amount", -1}},
-				},
+		bson.D{
+			{Key: "$group", Value: bson.D{
+				{Key: "_id", Value: bson.D{
+					{Key: "year", Value: bson.D{{Key: "$year", Value: "$date"}}},
+					{Key: "month", Value: bson.D{{Key: "$month", Value: "$date"}}},
+					{Key: "category", Value: "$category"},
+				}},
+				{Key: "totalAmount", Value: bson.D{
+					{Key: "$sum", Value: bson.D{
+						{Key: "$cond", Value: bson.A{
+							bson.D{{Key: "$eq", Value: bson.A{"$type", "credit"}}},
+							"$amount",
+							bson.D{{Key: "$multiply", Value: bson.A{"$amount", -1}}},
+						}},
+					}},
+				}},
 			}},
-		}}},
+		},
 		// Group by year and month to get category breakdown
-		{{Key: "$group", Value: bson.M{
-			"_id": bson.M{
-				"year":  "$_id.year",
-				"month": "$_id.month",
-			},
-			"categories": bson.M{"$push": bson.M{
-				"category": "$_id.category",
-				"amount":   "$totalAmount",
+		bson.D{
+			{Key: "$group", Value: bson.D{
+				{Key: "_id", Value: bson.D{
+					{Key: "year", Value: "$_id.year"},
+					{Key: "month", Value: "$_id.month"},
+				}},
+				{Key: "categories", Value: bson.D{
+					{Key: "$push", Value: bson.D{
+						{Key: "category", Value: "$_id.category"},
+						{Key: "amount", Value: "$totalAmount"},
+					}},
+				}},
+				{Key: "totalIncome", Value: bson.D{
+					{Key: "$sum", Value: bson.D{
+						{Key: "$cond", Value: bson.A{
+							bson.D{{Key: "$gt", Value: bson.A{"$totalAmount", 0}}},
+							"$totalAmount",
+							0,
+						}},
+					}},
+				}},
+				{Key: "totalExpenses", Value: bson.D{
+					{Key: "$sum", Value: bson.D{
+						{Key: "$cond", Value: bson.A{
+							bson.D{{Key: "$lt", Value: bson.A{"$totalAmount", 0}}},
+							bson.D{{Key: "$abs", Value: "$totalAmount"}},
+							0,
+						}},
+					}},
+				}},
 			}},
-			"totalIncome": bson.M{"$sum": bson.M{
-				"$cond": []interface{}{
-					bson.M{"$gt": []interface{}{"$totalAmount", 0}},
-					"$totalAmount",
-					0,
-				},
-			}},
-			"totalExpenses": bson.M{"$sum": bson.M{
-				"$cond": []interface{}{
-					bson.M{"$lt": []interface{}{"$totalAmount", 0}},
-					bson.M{"$abs": "$totalAmount"},
-					0,
-				},
-			}},
-		}}},
+		},
 		// Sort by year and month
-		{{Key: "$sort", Value: bson.M{
-			"_id.year":  1,
-			"_id.month": 1,
-		}}},
+		bson.D{
+			{Key: "$sort", Value: bson.D{
+				{Key: "_id.year", Value: 1},
+				{Key: "_id.month", Value: 1},
+			}},
+		},
 	}
 
 	cursor, err := collection.Aggregate(ctx, pipeline)
