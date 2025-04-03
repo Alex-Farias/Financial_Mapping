@@ -61,14 +61,14 @@ func main() {
 
 	// Create indexes for better query performance
 	indexModels := []mongo.IndexModel{
-		{
-			Keys: bson.M{"userId": 1, "date": -1},
-		},
-		{
-			Keys: bson.M{"userId": 1, "description": 1, "date": 1, "amount": 1},
-			Options: options.Index().SetUnique(true), // Prevent duplicate entries
-		},
-	}
+        {
+            Keys: bson.D{{"userId", 1}, {"date", -1}},
+        },
+        {
+            Keys: bson.D{{"userId", 1}, {"description", 1}, {"date", 1}, {"amount", 1}},
+            Options: options.Index().SetUnique(true), // Prevent duplicate entries
+        },
+    }
 
 	_, err = collection.Indexes().CreateMany(ctx, indexModels)
 	if err != nil {
@@ -77,7 +77,7 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
-	router.HandleFunc("/upload", uploadHandler).Methods("POST")
+    router.HandleFunc("/upload", uploadHandler).Methods("POST")
 	router.HandleFunc("/scan", scanFolderHandler).Methods("POST")
 
 	port := os.Getenv("PORT")
@@ -97,7 +97,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
         return
     }
 
-    // Parse multipart form with 32MB max memory
+    // Parse multipart form
     if err := r.ParseMultipartForm(32 << 20); err != nil {
         http.Error(w, "Failed to parse form", http.StatusBadRequest)
         return
@@ -115,16 +115,47 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
     reader := csv.NewReader(file)
     
     // Skip header row
-    _, err = reader.Read()
+    headerRow, err := reader.Read()
     if err != nil {
         http.Error(w, "Failed to read CSV header", http.StatusBadRequest)
         return
     }
-
+    
+    log.Printf("CSV Headers: %v", headerRow)
+    
+    // Determine column indices based on Nubank format
+    dateCol := -1
+    amountCol := -1
+    identifierCol := -1
+    descriptionCol := -1
+    
+    for i, header := range headerRow {
+        header = strings.ToLower(strings.TrimSpace(header))
+        switch header {
+        case "data":
+            dateCol = i
+        case "valor":
+            amountCol = i
+        case "identificador":
+            identifierCol = i
+        case "descrição", "descricao":
+            descriptionCol = i
+        }
+    }
+    
+    // Check if required columns were found
+    if dateCol == -1 || amountCol == -1 || descriptionCol == -1 {
+        log.Printf("Required columns not found. Headers: %v", headerRow)
+        http.Error(w, "CSV format not recognized. Requires Data, Valor, and Descrição columns", http.StatusBadRequest)
+        return
+    }
+    
     // Process rows
     var transactions []Transaction
+    lineCount := 1 // Header is line 1
     
     for {
+        lineCount++
         row, err := reader.Read()
         if err == io.EOF {
             break
@@ -134,49 +165,65 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             return
         }
         
-        // Skip empty rows
-        if len(row) < 3 {
+        log.Printf("Processing row %d: %v", lineCount, row)
+        
+        // Skip if we don't have enough columns
+        if len(row) <= dateCol || len(row) <= amountCol || len(row) <= descriptionCol {
+            log.Printf("Row %d has insufficient columns", lineCount)
             continue
         }
         
-        // Parse transaction data from CSV
-        date, err := time.Parse("2006-01-02", strings.TrimSpace(row[0]))
+        // Parse date (Nubank format is likely DD/MM/YYYY)
+        dateStr := strings.TrimSpace(row[dateCol])
+        date, err := time.Parse("02/01/2006", dateStr)
         if err != nil {
-            // Try alternative date format
-            date, err = time.Parse("01/02/2006", strings.TrimSpace(row[0]))
-            if err != nil {
-                continue // Skip rows with invalid dates
+            // Try alternative date formats
+            formats := []string{"2006-01-02", "01/02/2006", "02-01-2006"}
+            parsed := false
+            
+            for _, format := range formats {
+                if date, err = time.Parse(format, dateStr); err == nil {
+                    parsed = true
+                    break
+                }
+            }
+            
+            if !parsed {
+                log.Printf("Row %d: Invalid date format: %s", lineCount, dateStr)
+                continue
             }
         }
         
-        description := strings.TrimSpace(row[1])
+        // Parse description
+        description := strings.TrimSpace(row[descriptionCol])
         
-        // Parse amount and determine transaction type
-        amountStr := strings.TrimSpace(row[2])
-        amountStr = strings.ReplaceAll(amountStr, ",", "")
-        amountStr = strings.ReplaceAll(amountStr, "$", "")
+        // Parse amount
+        amountStr := strings.TrimSpace(row[amountCol])
+        amountStr = strings.ReplaceAll(amountStr, ".", "") // Remove thousand separators
+        amountStr = strings.ReplaceAll(amountStr, ",", ".") // Convert decimal comma to point
+        amountStr = strings.ReplaceAll(amountStr, "R$", "") // Remove currency symbol
+        amountStr = strings.TrimSpace(amountStr)
+        
         amount, err := strconv.ParseFloat(amountStr, 64)
         if err != nil {
-            continue // Skip rows with invalid amounts
+            log.Printf("Row %d: Invalid amount format: %s", lineCount, amountStr)
+            continue
         }
         
-        // Determine transaction type based on amount sign or column
+        // Determine transaction type based on amount
         transType := "debit"
         if amount > 0 {
             transType = "credit"
         }
         amount = math.Abs(amount) // Store amount as positive
         
-        // Get category if available
+        // Get category from identifier or set default
         category := "Uncategorized"
-        if len(row) > 3 {
-            category = strings.TrimSpace(row[3])
-        }
-        
-        // Get source if available
-        source := r.FormValue("source")
-        if source == "" {
-            source = "import"
+        if identifierCol >= 0 && len(row) > identifierCol {
+            identifier := strings.TrimSpace(row[identifierCol])
+            if identifier != "" {
+                category = identifier
+            }
         }
         
         transaction := Transaction{
@@ -186,10 +233,11 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             Category:    category,
             Amount:      amount,
             Type:        transType,
-            Source:      source,
+            Source:      "nubank",
         }
         
         transactions = append(transactions, transaction)
+        log.Printf("Added transaction: %+v", transaction)
     }
     
     // Insert transactions into MongoDB

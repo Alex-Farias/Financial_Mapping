@@ -65,8 +65,13 @@ func createReverseProxy(targetURL string) http.Handler {
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
-
-		// Get user ID from context
+		
+		// Strip the prefix from the URL path
+		if strings.HasPrefix(req.URL.Path, "/api/import") {
+			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/import")
+		}
+		
+		// Add user ID if available
 		if userID, ok := req.Context().Value("userID").(string); ok {
 			req.Header.Set("X-User-ID", userID)
 		}
@@ -111,19 +116,23 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Extract claims
+		// In your authMiddleware function
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
+			log.Printf("Invalid token claims format")
 			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
 			return
 		}
 
-		// Set user ID in context
+		// Check that 'email' claim exists
 		userID, ok := claims["email"].(string)
 		if !ok {
-			http.Error(w, "Invalid user ID in token", http.StatusUnauthorized)
+			log.Printf("Email claim missing from token")
+			http.Error(w, "Invalid token: missing email claim", http.StatusUnauthorized)
 			return
 		}
+
+		log.Printf("Successfully authenticated user: %s", userID)
 
 		// Create a new request context with the user ID
 		ctx := context.WithValue(r.Context(), "userID", userID)
@@ -141,7 +150,10 @@ func corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		
 		// Allow common headers
+		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-ID")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		
 		// Handle preflight requests
 		if r.Method == "OPTIONS" {

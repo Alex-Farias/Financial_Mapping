@@ -9,7 +9,9 @@ services:
     volumes:
       - mongodb_data:/data/db
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - mongodb
     restart: always
 
   auth-service:
@@ -25,7 +27,9 @@ services:
     depends_on:
       - mongodb
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - auth-service
     restart: always
 
   import-service:
@@ -37,11 +41,21 @@ services:
       - "8082:8082"
     environment:
       - MONGO_URI=mongodb://mongodb:27017
+      - JWT_SECRET=your_secret_key_change_in_production
     depends_on:
       - mongodb
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - import-service
     restart: always
+    # Add healthcheck to restart if service crashes
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8082/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
 
   analysis-service:
     build:
@@ -52,10 +66,13 @@ services:
       - "8083:8083"
     environment:
       - MONGO_URI=mongodb://mongodb:27017
+      - JWT_SECRET=your_secret_key_change_in_production
     depends_on:
       - mongodb
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - analysis-service
     restart: always
 
   export-service:
@@ -67,10 +84,13 @@ services:
       - "8084:8084"
     environment:
       - MONGO_URI=mongodb://mongodb:27017
+      - JWT_SECRET=your_secret_key_change_in_production
     depends_on:
       - mongodb
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - export-service
     restart: always
 
   api-gateway:
@@ -92,7 +112,9 @@ services:
       - analysis-service
       - export-service
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - api-gateway
     restart: always
 
   frontend:
@@ -100,13 +122,20 @@ services:
       context: ./bank-analysis/frontend
       dockerfile: Dockerfile
     container_name: bank-analysis-frontend
+    environment:
+      - VUE_APP_API_URL=http://localhost:8080/api
     ports:
       - "80:80"
     depends_on:
       - api-gateway
     networks:
-      - bank-network
+      bank-network:
+        aliases:
+          - frontend
     restart: always
+    volumes:
+      # Mount .env file for environment variables
+      - ./bank-analysis/frontend/.env:/usr/share/nginx/html/.env
 
 networks:
   bank-network:

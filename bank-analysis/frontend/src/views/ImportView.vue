@@ -129,6 +129,7 @@ export default {
       const files = event.target.files
       if (files.length > 0) {
         this.selectedFile = files[0]
+        console.log("File selected:", this.selectedFile.name, this.selectedFile.size)
       }
     },
     
@@ -171,8 +172,8 @@ export default {
       this.isUploading = true
       
       try {
-        const formData = new FormData()
-        formData.append('csv_file', this.selectedFile)
+        const formData = new FormData();
+        formData.append('file', this.selectedFile);  // Make sure it's 'file' not 'csv_file' or something else
         
         const response = await axios.post('/import/upload', formData, {
           headers: {
