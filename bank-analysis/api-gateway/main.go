@@ -61,19 +61,38 @@ func createReverseProxy(targetURL string) http.Handler {
 
 	proxy := httputil.NewSingleHostReverseProxy(url)
 
-	// Modify request to add X-User-ID header from JWT claims
+	// Modify request to strip the /api/{service} prefix and add X-User-ID header
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
 		originalDirector(req)
 		
-		// Strip the prefix from the URL path
-		if strings.HasPrefix(req.URL.Path, "/api/import") {
-			req.URL.Path = strings.TrimPrefix(req.URL.Path, "/api/import")
+		// Save original URL for logging
+		originalPath := req.URL.Path
+		
+		// Remove /api prefix
+		path := strings.TrimPrefix(originalPath, "/api")
+		
+		// Remove service prefix (keep only the endpoint part)
+		parts := strings.SplitN(path, "/", 3)
+		if len(parts) >= 3 {
+			// If path is like /import/upload, we want just /upload
+			req.URL.Path = "/" + parts[2]
+		} else if len(parts) == 2 {
+			// If path is like /import/?, we want just /?
+			if strings.Contains(parts[1], "?") {
+				req.URL.Path = "/"
+			} else {
+				// If path is like /import, we want just /
+				req.URL.Path = "/"
+			}
 		}
 		
-		// Add user ID if available
+		log.Printf("Forwarding request: %s -> %s%s", originalPath, targetURL, req.URL.Path)
+		
+		// Get user ID from context
 		if userID, ok := req.Context().Value("userID").(string); ok {
 			req.Header.Set("X-User-ID", userID)
+			log.Printf("Added X-User-ID header: %s", userID)
 		}
 	}
 
@@ -86,6 +105,7 @@ func authMiddleware(next http.Handler) http.Handler {
 		// Get token from Authorization header
 		authHeader := r.Header.Get("Authorization")
 		if authHeader == "" {
+			log.Printf("Missing Authorization header for: %s", r.URL.Path)
 			http.Error(w, "Authorization header required", http.StatusUnauthorized)
 			return
 		}
@@ -95,6 +115,8 @@ func authMiddleware(next http.Handler) http.Handler {
 		if strings.HasPrefix(authHeader, "Bearer ") {
 			tokenString = authHeader[7:]
 		}
+
+		log.Printf("Processing token: %s... for path: %s", tokenString[:10], r.URL.Path)
 
 		// Parse token
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
@@ -106,17 +128,19 @@ func authMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil {
+			log.Printf("Token parsing error: %v", err)
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
 
 		// Check if token is valid
 		if !token.Valid {
+			log.Printf("Token is invalid")
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
 		}
 
-		// In your authMiddleware function
+		// Extract claims
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
 			log.Printf("Invalid token claims format")
@@ -124,15 +148,15 @@ func authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		// Check that 'email' claim exists
+		// Set user ID in context
 		userID, ok := claims["email"].(string)
 		if !ok {
-			log.Printf("Email claim missing from token")
-			http.Error(w, "Invalid token: missing email claim", http.StatusUnauthorized)
+			log.Printf("Invalid user ID in token")
+			http.Error(w, "Invalid user ID in token", http.StatusUnauthorized)
 			return
 		}
 
-		log.Printf("Successfully authenticated user: %s", userID)
+		log.Printf("User authenticated: %s for path: %s", userID, r.URL.Path)
 
 		// Create a new request context with the user ID
 		ctx := context.WithValue(r.Context(), "userID", userID)
@@ -150,10 +174,7 @@ func corsMiddleware(next http.Handler) http.Handler {
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		
 		// Allow common headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-User-ID")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
 		
 		// Handle preflight requests
 		if r.Method == "OPTIONS" {

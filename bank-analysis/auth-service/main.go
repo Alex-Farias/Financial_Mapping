@@ -3,11 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt" // Add this import
+	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"strings" // Add this import
 	"time"
 
 	"github.com/dgrijalva/jwt-go"
@@ -40,14 +39,14 @@ type RegisterRequest struct {
 
 // Response represents the HTTP response
 type Response struct {
-    Message string `json:"message"`
-    Token   string `json:"token,omitempty"`
-    Email   string `json:"email,omitempty"`  // Add this field
+	Message string `json:"message"`
+	Token   string `json:"token,omitempty"`
+	Email   string `json:"email,omitempty"`
 }
 
 var client *mongo.Client
 var collection *mongo.Collection
-var jwtKey = []byte("your_secret_key") // In production, use environment variable
+var jwtKey []byte
 
 func main() {
 	// MongoDB connection
@@ -59,6 +58,13 @@ func main() {
 		mongoURI = "mongodb://localhost:27017"
 	}
 
+	// Get JWT secret from environment
+	jwtSecret := os.Getenv("JWT_SECRET")
+	if jwtSecret == "" {
+		jwtSecret = "your_secret_key_change_in_production"
+	}
+	jwtKey = []byte(jwtSecret)
+
 	var err error
 	client, err = mongo.Connect(ctx, options.Client().ApplyURI(mongoURI))
 	if err != nil {
@@ -69,7 +75,7 @@ func main() {
 
 	// Create a unique index on the email field
 	indexModel := mongo.IndexModel{
-		Keys:    bson.M{"email": 1},
+		Keys:    bson.D{{Key: "email", Value: 1}},
 		Options: options.Index().SetUnique(true),
 	}
 	_, err = collection.Indexes().CreateOne(ctx, indexModel)
@@ -79,6 +85,16 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
+	
+	// Add debug endpoint
+	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok", 
+			"service": "auth",
+		})
+	}).Methods("GET")
+	
 	authRouter := router.PathPrefix("/api/auth").Subrouter()
 	authRouter.HandleFunc("/register", registerHandler).Methods("POST")
 	authRouter.HandleFunc("/login", loginHandler).Methods("POST")
@@ -97,6 +113,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	var req RegisterRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
+		log.Printf("Bad request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -104,6 +121,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Hash the password
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
 	if err != nil {
+		log.Printf("Could not hash password: %v", err)
 		http.Error(w, "Could not hash password", http.StatusInternalServerError)
 		return
 	}
@@ -120,6 +138,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Fix: Properly handle or ignore the insertion result
 	_, err = collection.InsertOne(ctx, user)
 	if err != nil {
+		log.Printf("User creation error: %v", err)
 		http.Error(w, "Email already exists or server error", http.StatusInternalServerError)
 		return
 	}
@@ -127,6 +146,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	// Generate JWT
 	token, err := generateToken(req.Email)
 	if err != nil {
+		log.Printf("Token generation error: %v", err)
 		http.Error(w, "Could not generate token", http.StatusInternalServerError)
 		return
 	}
@@ -135,6 +155,7 @@ func registerHandler(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Message: "User registered successfully",
 		Token:   token,
+		Email:   req.Email,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -146,6 +167,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var req LoginRequest
 	err := json.NewDecoder(r.Body).Decode(&req)
 	if err != nil {
+		log.Printf("Bad request: %v", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -157,6 +179,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	var user User
 	err = collection.FindOne(ctx, bson.M{"email": req.Email}).Decode(&user)
 	if err != nil {
+		log.Printf("User not found: %v", err)
 		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 		return
 	}
@@ -164,6 +187,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Compare passwords
 	err = bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(req.Password))
 	if err != nil {
+		log.Printf("Password mismatch: %v", err)
 		http.Error(w, "Invalid email or password", http.StatusUnauthorized)
 		return
 	}
@@ -171,6 +195,7 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	// Generate JWT
 	token, err := generateToken(req.Email)
 	if err != nil {
+		log.Printf("Token generation error: %v", err)
 		http.Error(w, "Could not generate token", http.StatusInternalServerError)
 		return
 	}
@@ -179,10 +204,60 @@ func loginHandler(w http.ResponseWriter, r *http.Request) {
 	resp := Response{
 		Message: "Login successful",
 		Token:   token,
+		Email:   req.Email,
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func validateTokenHandler(w http.ResponseWriter, r *http.Request) {
+	// Get token from Authorization header
+	tokenString := r.Header.Get("Authorization")
+	if tokenString == "" {
+		log.Printf("Missing Authorization header")
+		http.Error(w, "Authorization header required", http.StatusUnauthorized)
+		return
+	}
+
+	// Remove "Bearer " prefix if present
+	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
+		tokenString = tokenString[7:]
+	}
+
+	// Parse and validate token
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		// Validate signing method
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+		}
+		return jwtKey, nil
+	})
+
+	if err != nil || !token.Valid {
+		log.Printf("Invalid token: %v", err)
+		http.Error(w, "Invalid token", http.StatusUnauthorized)
+		return
+	}
+
+	// Extract claims
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		log.Printf("Invalid token claims format")
+		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+		return
+	}
+	
+	email, ok := claims["email"].(string)
+	if !ok {
+		log.Printf("Email claim missing from token")
+		http.Error(w, "Invalid token: missing email claim", http.StatusUnauthorized)
+		return
+	}
+
+	// Token is valid
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(Response{Message: "Token is valid", Email: email})
 }
 
 func generateToken(email string) (string, error) {
@@ -195,132 +270,13 @@ func generateToken(email string) (string, error) {
 	// Create token
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 
-	// Get JWT secret from environment variable
-	secretKey := os.Getenv("JWT_SECRET")
-	if secretKey == "" {
-		secretKey = "your_secret_key" // Fallback
-	}
-
 	// Sign token with secret key
-	tokenString, err := token.SignedString([]byte(secretKey))
+	tokenString, err := token.SignedString(jwtKey)
 	if err != nil {
-		log.Printf("Error generating token: %v", err)
+		log.Printf("Error signing token: %v", err)
 		return "", err
 	}
 
-	log.Printf("Generated token for %s", email)
+	log.Printf("Generated token for user: %s", email)
 	return tokenString, nil
-}
-
-func validateTokenHandler(w http.ResponseWriter, r *http.Request) {
-	// Get token from Authorization header
-	tokenString := r.Header.Get("Authorization")
-	if tokenString == "" {
-		http.Error(w, "Authorization header required", http.StatusUnauthorized)
-		return
-	}
-
-	// Remove "Bearer " prefix if present
-	if len(tokenString) > 7 && tokenString[:7] == "Bearer " {
-		tokenString = tokenString[7:]
-	}
-
-	// Get JWT secret from environment variable
-	secretKey := os.Getenv("JWT_SECRET")
-	if secretKey == "" {
-		secretKey = "your_secret_key" // Fallback
-	}
-
-	// Parse and validate token
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Validate signing method
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-		}
-		return []byte(secretKey), nil
-	})
-
-	if err != nil || !token.Valid {
-		log.Printf("Token validation error: %v", err)
-		http.Error(w, "Invalid token", http.StatusUnauthorized)
-		return
-	}
-
-	// Get claims for response
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		http.Error(w, "Invalid token claims", http.StatusUnauthorized)
-		return
-	}
-
-	// Token is valid, return user info
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(Response{
-		Message: "Token is valid",
-		Email:   claims["email"].(string),
-	})
-}
-
-// authMiddleware validates JWT tokens and adds userID to request context
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Get token from Authorization header
-		authHeader := r.Header.Get("Authorization")
-		if authHeader == "" {
-			http.Error(w, "Authorization header required", http.StatusUnauthorized)
-			return
-		}
-
-		// Remove Bearer prefix if present
-		tokenString := authHeader
-		if strings.HasPrefix(authHeader, "Bearer ") {
-			tokenString = authHeader[7:]
-		}
-
-		log.Printf("Received token: %s", tokenString)
-
-		// Parse token
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Validate signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
-			}
-			return jwtKey, nil
-		})
-
-		if err != nil {
-			log.Printf("Token parsing error: %v", err)
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		// Check if token is valid
-		if !token.Valid {
-			log.Printf("Token is invalid")
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
-			return
-		}
-
-		// Extract claims
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			log.Printf("Invalid token claims format")
-			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
-			return
-		}
-
-		// Set user ID in context
-		userID, ok := claims["email"].(string)
-		if !ok {
-			log.Printf("Invalid user ID in token claims")
-			http.Error(w, "Invalid user ID in token", http.StatusUnauthorized)
-			return
-		}
-
-		log.Printf("User authenticated: %s", userID)
-
-		// Create a new request context with the user ID
-		ctx := context.WithValue(r.Context(), "userID", userID)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
 }

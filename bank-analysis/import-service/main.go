@@ -36,6 +36,7 @@ type Transaction struct {
 type Response struct {
 	Message string `json:"message"`
 	Count   int    `json:"count,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
 }
 
 var client *mongo.Client
@@ -59,25 +60,33 @@ func main() {
 
 	collection = client.Database("bank_analysis").Collection("transactions")
 
-	// Create indexes for better query performance
+	// Create indexes for better query performance - FIXED: Use bson.D instead of bson.M
 	indexModels := []mongo.IndexModel{
-        {
-            Keys: bson.D{{"userId", 1}, {"date", -1}},
-        },
-        {
-            Keys: bson.D{{"userId", 1}, {"description", 1}, {"date", 1}, {"amount", 1}},
-            Options: options.Index().SetUnique(true), // Prevent duplicate entries
-        },
-    }
+		{
+			Keys: bson.D{{Key: "userId", Value: 1}, {Key: "date", Value: -1}},
+		},
+		{
+			Keys: bson.D{{Key: "userId", Value: 1}, {Key: "description", Value: 1}, {Key: "date", Value: 1}, {Key: "amount", Value: 1}},
+			Options: options.Index().SetUnique(true), // Prevent duplicate entries
+		},
+	}
 
 	_, err = collection.Indexes().CreateMany(ctx, indexModels)
 	if err != nil {
-		log.Fatal(err)
+		log.Printf("Warning: Failed to create indexes: %v", err)
+		// Don't fatal here, just warn and continue
 	}
 
 	// HTTP server
 	router := mux.NewRouter()
-    router.HandleFunc("/upload", uploadHandler).Methods("POST")
+	
+	// Add debug endpoint for health checks
+	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}).Methods("GET")
+	
+	router.HandleFunc("/upload", uploadHandler).Methods("POST")
 	router.HandleFunc("/scan", scanFolderHandler).Methods("POST")
 
 	port := os.Getenv("PORT")
@@ -92,23 +101,32 @@ func main() {
 func uploadHandler(w http.ResponseWriter, r *http.Request) {
     // Extract user ID from the request
     userID := r.Header.Get("X-User-ID")
+    log.Printf("Upload request received - User ID: %s", userID)
+    
     if userID == "" {
+        log.Printf("ERROR: Missing X-User-ID header")
         http.Error(w, "User ID is required", http.StatusBadRequest)
         return
     }
 
-    // Parse multipart form
+    // Log headers for debugging
+    log.Printf("Request headers: %+v", r.Header)
+
+    // Parse multipart form with 32MB max memory
     if err := r.ParseMultipartForm(32 << 20); err != nil {
+        log.Printf("ERROR: Failed to parse form: %v", err)
         http.Error(w, "Failed to parse form", http.StatusBadRequest)
         return
     }
 
     // Get uploaded file
-    file, _, err := r.FormFile("file")
+    file, header, err := r.FormFile("file")
     if err != nil {
+        log.Printf("ERROR: Failed to get file from form: %v", err)
         http.Error(w, "Failed to get file from form", http.StatusBadRequest)
         return
     }
+    log.Printf("Received file: %s, size: %d bytes", header.Filename, header.Size)
     defer file.Close()
 
     // Process CSV file
@@ -117,6 +135,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
     // Skip header row
     headerRow, err := reader.Read()
     if err != nil {
+        log.Printf("ERROR: Failed to read CSV header: %v", err)
         http.Error(w, "Failed to read CSV header", http.StatusBadRequest)
         return
     }
@@ -161,6 +180,7 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
             break
         }
         if err != nil {
+            log.Printf("ERROR: Failed to read CSV row: %v", err)
             http.Error(w, "Failed to read CSV row", http.StatusBadRequest)
             return
         }
@@ -245,26 +265,65 @@ func uploadHandler(w http.ResponseWriter, r *http.Request) {
         ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
         defer cancel()
         
-        var docs []interface{}
-        for _, t := range transactions {
-            docs = append(docs, t)
-        }
-        
-        result, err := collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
-        if err != nil {
-            // Continue if some documents failed due to duplication
-            log.Printf("Warning during import: %v", err)
-        }
-        
+        // Try to insert one by one for better error reporting
         insertedCount := 0
-        if result != nil {
-            insertedCount = len(result.InsertedIDs)
+        var insertErrors []string
+        
+        for i, t := range transactions {
+            // Create a filter to find existing transactions
+            filter := bson.D{
+                {Key: "userId", Value: t.UserID},
+                {Key: "description", Value: t.Description},
+                {Key: "date", Value: t.Date},
+                {Key: "amount", Value: t.Amount},
+            }
+            
+            // Create an update document
+            update := bson.D{{Key: "$set", Value: t}}
+            
+            // Set upsert option (insert if not exists, update if exists)
+            opts := options.UpdateOptions{}
+            opts.SetUpsert(true)
+            
+            // Perform the upsert operation
+            result, err := collection.UpdateOne(ctx, filter, update, &opts)
+            if err != nil {
+                log.Printf("Error upserting transaction %d: %v", i, err)
+                insertErrors = append(insertErrors, fmt.Sprintf("Row %d: %v", i+1, err))
+            } else {
+                if result.UpsertedCount > 0 {
+                    // New document inserted
+                    insertedCount++
+                    log.Printf("Inserted new transaction for row %d", i+1)
+                } else if result.ModifiedCount > 0 {
+                    // Existing document updated
+                    insertedCount++
+                    log.Printf("Updated existing transaction for row %d", i+1)
+                } else {
+                    // Document already exists and wasn't modified
+                    log.Printf("Transaction already exists and is identical for row %d", i+1)
+                }
+            }
         }
         
-        // Create response
+        // Create detailed response
         resp := Response{
             Message: fmt.Sprintf("Successfully imported %d of %d transactions", insertedCount, len(transactions)),
             Count:   insertedCount,
+        }
+        
+        if len(insertErrors) > 0 {
+            // Add error details to the response
+            // Use custom minimum function instead of built-in min
+            maxErrors := 5
+            if len(insertErrors) < maxErrors {
+                maxErrors = len(insertErrors)
+            }
+            
+            resp.Errors = insertErrors[:maxErrors]
+            if len(insertErrors) > maxErrors {
+                resp.Message += fmt.Sprintf(" and %d more errors", len(insertErrors)-maxErrors)
+            }
         }
         
         w.Header().Set("Content-Type", "application/json")
@@ -332,8 +391,34 @@ func scanFolderHandler(w http.ResponseWriter, r *http.Request) {
         reader := csv.NewReader(file)
         
         // Skip header row
-        _, err = reader.Read()
+        headerRow, err := reader.Read()
         if err != nil {
+            file.Close()
+            continue
+        }
+        
+        // Determine column indices based on headers
+        dateCol := -1
+        amountCol := -1
+        identifierCol := -1
+        descriptionCol := -1
+        
+        for i, header := range headerRow {
+            header = strings.ToLower(strings.TrimSpace(header))
+            switch header {
+            case "data":
+                dateCol = i
+            case "valor":
+                amountCol = i
+            case "identificador":
+                identifierCol = i
+            case "descrição", "descricao":
+                descriptionCol = i
+            }
+        }
+        
+        // Skip if required columns not found
+        if dateCol == -1 || amountCol == -1 || descriptionCol == -1 {
             file.Close()
             continue
         }
@@ -350,40 +435,60 @@ func scanFolderHandler(w http.ResponseWriter, r *http.Request) {
                 break
             }
             
-            // Skip empty rows
-            if len(row) < 3 {
+            // Skip if we don't have enough columns
+            if len(row) <= dateCol || len(row) <= amountCol || len(row) <= descriptionCol {
                 continue
             }
             
-            // Parse transaction data from CSV (similar to uploadHandler)
-            date, err := time.Parse("2006-01-02", strings.TrimSpace(row[0]))
+            // Parse date
+            dateStr := strings.TrimSpace(row[dateCol])
+            date, err := time.Parse("02/01/2006", dateStr)
             if err != nil {
-                // Try alternative date format
-                date, err = time.Parse("01/02/2006", strings.TrimSpace(row[0]))
-                if err != nil {
+                // Try alternative date formats
+                formats := []string{"2006-01-02", "01/02/2006", "02-01-2006"}
+                parsed := false
+                
+                for _, format := range formats {
+                    if date, err = time.Parse(format, dateStr); err == nil {
+                        parsed = true
+                        break
+                    }
+                }
+                
+                if !parsed {
                     continue
                 }
             }
             
-            description := strings.TrimSpace(row[1])
+            // Parse description
+            description := strings.TrimSpace(row[descriptionCol])
             
-            amountStr := strings.TrimSpace(row[2])
-            amountStr = strings.ReplaceAll(amountStr, ",", "")
-            amountStr = strings.ReplaceAll(amountStr, "$", "")
+            // Parse amount
+            amountStr := strings.TrimSpace(row[amountCol])
+            amountStr = strings.ReplaceAll(amountStr, ".", "") // Remove thousand separators
+            amountStr = strings.ReplaceAll(amountStr, ",", ".") // Convert decimal comma to point
+            amountStr = strings.ReplaceAll(amountStr, "R$", "") // Remove currency symbol
+            amountStr = strings.TrimSpace(amountStr)
+            
             amount, err := strconv.ParseFloat(amountStr, 64)
             if err != nil {
                 continue
             }
             
+            // Determine transaction type based on amount
             transType := "debit"
             if amount > 0 {
                 transType = "credit"
             }
-            amount = math.Abs(amount)
+            amount = math.Abs(amount) // Store amount as positive
             
+            // Get category from identifier or set default
             category := "Uncategorized"
-            if len(row) > 3 {
-                category = strings.TrimSpace(row[3])
+            if identifierCol >= 0 && len(row) > identifierCol {
+                identifier := strings.TrimSpace(row[identifierCol])
+                if identifier != "" {
+                    category = identifier
+                }
             }
             
             transaction := Transaction{
@@ -405,22 +510,35 @@ func scanFolderHandler(w http.ResponseWriter, r *http.Request) {
         if len(transactions) > 0 {
             ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
             
-            var docs []interface{}
-            for _, t := range transactions {
-                docs = append(docs, t)
-            }
-            
-            result, err := collection.InsertMany(ctx, docs, options.InsertMany().SetOrdered(false))
-            cancel()
-            
-            if err != nil {
-                log.Printf("Warning during import of file %s: %v", filePath, err)
-            }
-            
+            // Use upsert for each transaction
             insertedCount := 0
-            if result != nil {
-                insertedCount = len(result.InsertedIDs)
+            
+            for _, t := range transactions {
+                // Create a filter to find existing transactions
+                filter := bson.D{
+                    {Key: "userId", Value: t.UserID},
+                    {Key: "description", Value: t.Description},
+                    {Key: "date", Value: t.Date},
+                    {Key: "amount", Value: t.Amount},
+                }
+                
+                // Create an update document
+                update := bson.D{{Key: "$set", Value: t}}
+                
+                // Set upsert option
+                opts := options.UpdateOptions{}
+                opts.SetUpsert(true)
+                
+                // Perform the upsert operation
+                result, err := collection.UpdateOne(ctx, filter, update, &opts)
+                if err == nil {
+                    if result.UpsertedCount > 0 || result.ModifiedCount > 0 {
+                        insertedCount++
+                    }
+                }
             }
+            
+            cancel()
             
             totalProcessed += insertedCount
             totalFiles++

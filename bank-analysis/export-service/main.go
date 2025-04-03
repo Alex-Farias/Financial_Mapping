@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -49,7 +51,22 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
-	router.HandleFunc("/export/csv", exportCSVHandler).Methods("GET")
+	
+	// Add debug endpoint
+	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		userID := r.Header.Get("X-User-ID")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok", 
+			"service": "export", 
+			"userID": userID,
+		})
+	}).Methods("GET")
+	
+	router.HandleFunc("/csv", exportCSVHandler).Methods("GET")
+	
+	// Debug endpoint to view transactions
+	router.HandleFunc("/debug/transactions", debugTransactionsHandler).Methods("GET")
 
 	port := os.Getenv("PORT")
 	if port == "" {
@@ -98,6 +115,15 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Add source filter if specified
+	if sourceParam := r.URL.Query().Get("sources"); sourceParam != "" {
+		sources := bson.A{}
+		for _, source := range strings.Split(sourceParam, ",") {
+			sources = append(sources, source)
+		}
+		filter["source"] = bson.M{"$in": sources}
+	}
+
 	// Query transactions from MongoDB
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -105,6 +131,7 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 	findOptions := options.Find().SetSort(bson.M{"date": 1}) // Sort by date ascending
 	cursor, err := collection.Find(ctx, filter, findOptions)
 	if err != nil {
+		log.Printf("Database error: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -113,6 +140,7 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse results
 	var transactions []Transaction
 	if err := cursor.All(ctx, &transactions); err != nil {
+		log.Printf("Error parsing results: %v", err)
 		http.Error(w, "Error parsing results", http.StatusInternalServerError)
 		return
 	}
@@ -129,6 +157,7 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 	// Write CSV header
 	header := []string{"Date", "Description", "Category", "Amount", "Type", "Source"}
 	if err := csvWriter.Write(header); err != nil {
+		log.Printf("Error writing CSV header: %v", err)
 		http.Error(w, "Error writing CSV", http.StatusInternalServerError)
 		return
 	}
@@ -151,8 +180,43 @@ func exportCSVHandler(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if err := csvWriter.Write(row); err != nil {
+			log.Printf("Error writing CSV row: %v", err)
 			http.Error(w, "Error writing CSV", http.StatusInternalServerError)
 			return
 		}
 	}
+}
+
+func debugTransactionsHandler(w http.ResponseWriter, r *http.Request) {
+	userID := r.Header.Get("X-User-ID")
+	if userID == "" {
+		http.Error(w, "User ID is required", http.StatusBadRequest)
+		return
+	}
+	
+	limit := 100 // Default limit
+	
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	filter := bson.M{"userId": userID}
+	findOptions := options.Find().SetLimit(int64(limit)).SetSort(bson.M{"date": -1})
+	
+	cursor, err := collection.Find(ctx, filter, findOptions)
+	if err != nil {
+		log.Printf("Database error: %v", err)
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		return
+	}
+	defer cursor.Close(ctx)
+	
+	var transactions []Transaction
+	if err := cursor.All(ctx, &transactions); err != nil {
+		log.Printf("Error parsing results: %v", err)
+		http.Error(w, "Error parsing results", http.StatusInternalServerError)
+		return
+	}
+	
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(transactions)
 }

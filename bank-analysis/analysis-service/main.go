@@ -29,11 +29,11 @@ type Transaction struct {
 
 // MonthlySpending represents monthly spending aggregation
 type MonthlySpending struct {
-	Month          string             `json:"month"`
-	Year           int                `json:"year"`
-	TotalIncome    float64            `json:"totalIncome"`
-	TotalExpenses  float64            `json:"totalExpenses"`
-	NetCashflow    float64            `json:"netCashflow"`
+	Month            string             `json:"month"`
+	Year             int                `json:"year"`
+	TotalIncome      float64            `json:"totalIncome"`
+	TotalExpenses    float64            `json:"totalExpenses"`
+	NetCashflow      float64            `json:"netCashflow"`
 	CategoryBreakdown map[string]float64 `json:"categoryBreakdown"`
 }
 
@@ -66,9 +66,22 @@ func main() {
 
 	// HTTP server
 	router := mux.NewRouter()
+	
+	// Add debug endpoint
+	router.HandleFunc("/ping", func(w http.ResponseWriter, r *http.Request) {
+		userID := r.Header.Get("X-User-ID")
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok", 
+			"service": "analysis", 
+			"userID": userID,
+		})
+	}).Methods("GET")
+	
+	// Main routes - notice these are WITHOUT the /api/analysis prefix
+	router.HandleFunc("/monthly", getMonthlyAnalysisHandler).Methods("GET")
 	router.HandleFunc("/transactions", getTransactionsHandler).Methods("GET")
 	router.HandleFunc("/transactions/search", searchTransactionsHandler).Methods("GET")
-	router.HandleFunc("/analysis/monthly", getMonthlyAnalysisHandler).Methods("GET")
 	router.HandleFunc("/categories", updateCategoryHandler).Methods("PUT")
 
 	port := os.Getenv("PORT")
@@ -111,6 +124,7 @@ func getTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 	filter := bson.M{"userId": userID}
 	total, err := collection.CountDocuments(ctx, filter)
 	if err != nil {
+		log.Printf("Error counting documents: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -123,6 +137,7 @@ func getTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	cursor, err := collection.Find(ctx, filter, findOptions)
 	if err != nil {
+		log.Printf("Error finding documents: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -131,6 +146,7 @@ func getTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse results
 	var transactions []Transaction
 	if err := cursor.All(ctx, &transactions); err != nil {
+		log.Printf("Error parsing results: %v", err)
 		http.Error(w, "Error parsing results", http.StatusInternalServerError)
 		return
 	}
@@ -179,6 +195,7 @@ func searchTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 
 	cursor, err := collection.Find(ctx, filter, findOptions)
 	if err != nil {
+		log.Printf("Error searching documents: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -187,6 +204,7 @@ func searchTransactionsHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse results
 	var transactions []Transaction
 	if err := cursor.All(ctx, &transactions); err != nil {
+		log.Printf("Error parsing search results: %v", err)
 		http.Error(w, "Error parsing results", http.StatusInternalServerError)
 		return
 	}
@@ -216,6 +234,7 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("Invalid request body: %v", err)
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -230,6 +249,7 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request) {
 	for _, id := range req.TransactionIDs {
 		objectID, err := primitive.ObjectIDFromHex(id)
 		if err != nil {
+			log.Printf("Invalid transaction ID format: %s - %v", id, err)
 			http.Error(w, "Invalid transaction ID format", http.StatusBadRequest)
 			return
 		}
@@ -251,6 +271,7 @@ func updateCategoryHandler(w http.ResponseWriter, r *http.Request) {
 	
 	result, err := collection.UpdateMany(ctx, filter, update)
 	if err != nil {
+		log.Printf("Database error updating categories: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -272,9 +293,12 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	// Extract user ID from the request
 	userID := r.Header.Get("X-User-ID")
 	if userID == "" {
+		log.Printf("Missing X-User-ID header for monthly analysis")
 		http.Error(w, "User ID is required", http.StatusBadRequest)
 		return
 	}
+
+	log.Printf("Processing monthly analysis for user: %s", userID)
 
 	// Get start date and end date
 	startStr := r.URL.Query().Get("start")
@@ -303,7 +327,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	// Group by year and month
 	pipeline := mongo.Pipeline{
 		// Match user's transactions within date range
-		{{"$match", bson.M{
+		{{Key: "$match", Value: bson.M{
 			"userId": userID,
 			"date": bson.M{
 				"$gte": start,
@@ -311,7 +335,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 			},
 		}}},
 		// Group by year, month, and category
-		{{"$group", bson.M{
+		{{Key: "$group", Value: bson.M{
 			"_id": bson.M{
 				"year":     bson.M{"$year": "$date"},
 				"month":    bson.M{"$month": "$date"},
@@ -326,7 +350,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 			}},
 		}}},
 		// Group by year and month to get category breakdown
-		{{"$group", bson.M{
+		{{Key: "$group", Value: bson.M{
 			"_id": bson.M{
 				"year":  "$_id.year",
 				"month": "$_id.month",
@@ -351,7 +375,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 			}},
 		}}},
 		// Sort by year and month
-		{{"$sort", bson.M{
+		{{Key: "$sort", Value: bson.M{
 			"_id.year":  1,
 			"_id.month": 1,
 		}}},
@@ -359,6 +383,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 
 	cursor, err := collection.Aggregate(ctx, pipeline)
 	if err != nil {
+		log.Printf("Error in aggregation: %v", err)
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		return
 	}
@@ -367,6 +392,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 	// Process results
 	var results []bson.M
 	if err := cursor.All(ctx, &results); err != nil {
+		log.Printf("Error parsing aggregation results: %v", err)
 		http.Error(w, "Error parsing results", http.StatusInternalServerError)
 		return
 	}
@@ -409,6 +435,7 @@ func getMonthlyAnalysisHandler(w http.ResponseWriter, r *http.Request) {
 		monthlySpending = append(monthlySpending, spending)
 	}
 	
+	log.Printf("Returning %d months of analysis data", len(monthlySpending))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(monthlySpending)
 }
