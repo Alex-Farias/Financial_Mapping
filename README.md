@@ -1,5 +1,7 @@
 # Financial_Mapping
 
+An AI generated project as complete development test of the benefits and issues about AI generated projects
+
 docker compose down --rmi all --volumes --remove-orphans
 
 docker compose up --build
